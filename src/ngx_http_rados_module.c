@@ -36,6 +36,7 @@ typedef struct {
     ngx_str_t pool;
     ngx_str_t conf_path;
     ngx_flag_t enable;
+    ngx_http_upstream_conf_t upstream;
 } ngx_http_rados_loc_conf_t;
 
 static ngx_int_t ngx_http_rados_init(ngx_http_rados_loc_conf_t *cf);
@@ -97,6 +98,7 @@ ngx_module_t  ngx_http_rados_module = {
     NGX_MODULE_V1_PADDING
 };
 
+
 static ngx_int_t
 ngx_http_rados_handler(ngx_http_request_t *request)
 {
@@ -114,6 +116,10 @@ ngx_http_rados_handler(ngx_http_request_t *request)
 
     ngx_int_t rc = NGX_OK;
     ngx_int_t err;
+
+	rc = ngx_http_discard_request_body(request);
+    if (rc != NGX_OK)
+		return rc;
 
     rados_conf = ngx_http_get_module_loc_conf(request, ngx_http_rados_module);
     core_conf = ngx_http_get_module_loc_conf(request, ngx_http_core_module);
@@ -150,7 +156,6 @@ ngx_http_rados_handler(ngx_http_request_t *request)
         return NGX_HTTP_BAD_REQUEST;
     }
 
-
     size_t size;
     time_t mtime;
     err = rados_stat(rados_conn->io, value, &size, &mtime);
@@ -160,7 +165,9 @@ ngx_http_rados_handler(ngx_http_request_t *request)
         return NGX_HTTP_NOT_FOUND;
     }
 
-    if(request->headers_in.if_modified_since && ngx_http_test_if_modified(request)) {
+    request->headers_out.last_modified_time = mtime;
+
+    if(request->headers_in.if_modified_since && !ngx_http_test_if_modified(request)) {
         return NGX_HTTP_NOT_MODIFIED;
     }
 
@@ -170,7 +177,6 @@ ngx_http_rados_handler(ngx_http_request_t *request)
     if (range_start == 0 && range_end == 0) {
         request->headers_out.status = NGX_HTTP_OK;
         request->headers_out.content_length_n = size;
-        request->headers_out.last_modified_time = mtime;
     } else if(range_start >= size || range_end > size || range_end < range_start){
             ngx_log_error(NGX_LOG_ERR, request->connection->log, 0,
                           "Invalid range requested start: %i end: %i", range_start, range_end);
