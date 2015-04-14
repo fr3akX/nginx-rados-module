@@ -19,6 +19,7 @@ static ngx_int_t ngx_http_rados_init_worker(ngx_cycle_t* cycle);
 static int url_decode(char * filename);
 static void http_parse_range(ngx_http_request_t* r, ngx_str_t* range_str, uint64_t* range_start, uint64_t* range_end, size_t content_length);
 static ngx_uint_t ngx_http_test_if_modified(ngx_http_request_t *r);
+static ngx_uint_t nginx_http_get_rados_key(ngx_http_request_t *request, char **value);
 
 typedef struct {
     ngx_array_t loc_confs; /* ngx_http_gridfs_loc_conf_t */
@@ -98,17 +99,13 @@ ngx_module_t  ngx_http_rados_module = {
     NGX_MODULE_V1_PADDING
 };
 
-
 static ngx_int_t
 ngx_http_rados_handler(ngx_http_request_t *request)
 {
     ngx_http_rados_loc_conf_t* rados_conf;
-    ngx_http_core_loc_conf_t* core_conf;
     ngx_buf_t* buffer;
     ngx_chain_t out;
-    ngx_str_t location_name;
-    ngx_str_t full_uri;
-    char* value;
+    char* value = NULL;
     ngx_http_rados_connection_t *rados_conn;
     char* contenttype = NULL;
     uint64_t range_start = 0;
@@ -122,39 +119,19 @@ ngx_http_rados_handler(ngx_http_request_t *request)
 		return rc;
 
     rados_conf = ngx_http_get_module_loc_conf(request, ngx_http_rados_module);
-    core_conf = ngx_http_get_module_loc_conf(request, ngx_http_core_module);
 
     rados_conn = ngx_http_get_rados_connection( rados_conf->pool );
     if(rados_conn == NULL) {
             ngx_log_error(NGX_LOG_ERR, request->connection->log, 0,
-                          "Rados Connection not found: \"%V\"", &rados_conf->pool);
+                          "Rados Connection not found: \"%s\"", &rados_conf->pool);
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    location_name = core_conf->name;
-    full_uri = request->uri;
-
-    if (full_uri.len < location_name.len) {
-        ngx_log_error(NGX_LOG_ERR, request->connection->log, 0,
-                      "Invalid location name or uri.");
-        return NGX_HTTP_INTERNAL_SERVER_ERROR;
-    }
-
-    value = ngx_pcalloc(request->pool, sizeof(char) * (full_uri.len - location_name.len + 1));
-    if (value == NULL) {
-        ngx_log_error(NGX_LOG_ERR, request->connection->log, 0,
-                      "Failed to allocate memory for value buffer.");
-        return NGX_HTTP_INTERNAL_SERVER_ERROR;
-    }
-
-    ngx_memcpy(value, full_uri.data + location_name.len, full_uri.len - location_name.len);
-    value[full_uri.len - location_name.len] = '\0';
-    if (!url_decode(value)) {
-        ngx_log_error(NGX_LOG_ERR, request->connection->log, 0,
-            "Malformed request.");
-            free(value);
-        return NGX_HTTP_BAD_REQUEST;
-    }
+    nginx_http_get_rados_key(request, &value);
+                ngx_log_error(NGX_LOG_ERR, request->connection->log, 0,
+                              "Request key: \"%s\"", value);
+    if(rc != NGX_OK)
+        return rc;
 
     size_t size;
     time_t mtime;
@@ -628,4 +605,43 @@ ngx_http_test_if_modified(ngx_http_request_t *r)
     }
 
     return 0;
+}
+
+static ngx_uint_t
+nginx_http_get_rados_key(ngx_http_request_t *request, char **value)
+{
+
+    ngx_str_t location_name;
+    ngx_str_t full_uri;
+    ngx_http_core_loc_conf_t *core_conf;
+    core_conf = ngx_http_get_module_loc_conf(request, ngx_http_core_module);
+
+    location_name = core_conf->name;
+    full_uri = request->uri;
+
+    if (full_uri.len < location_name.len) {
+        ngx_log_error(NGX_LOG_ERR, request->connection->log, 0,
+                      "Invalid location name or uri.");
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    *value = ngx_pcalloc(request->pool, sizeof(char) * (full_uri.len - location_name.len + 1));
+    if (*value == NULL) {
+        ngx_log_error(NGX_LOG_ERR, request->connection->log, 0,
+                      "Failed to allocate memory for value buffer.");
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    ngx_memcpy(*value, full_uri.data + location_name.len, full_uri.len - location_name.len);
+    value[full_uri.len - location_name.len] = '\0';
+
+
+    if (!url_decode(*value)) {
+        ngx_log_error(NGX_LOG_ERR, request->connection->log, 0,
+            "Malformed request.");
+            free(*value);
+        return NGX_HTTP_BAD_REQUEST;
+    }
+
+    return NGX_OK;
 }
