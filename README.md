@@ -3,7 +3,7 @@
  Supports range requests and conditional requests (WIP)
  
  Example usage:
- `
+ ```
      server {
          listen       80;
          server_name  localhost;
@@ -15,5 +15,4 @@
              rados;
          }
      }
-
- `
+ ```
