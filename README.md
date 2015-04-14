@@ -1,6 +1,6 @@
 # Nginx Rados access module
 
- Supports range requests and conditional requests (WIP)
+ Supports range requests and conditional requests
  
  Example usage:
  ```

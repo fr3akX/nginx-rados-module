@@ -18,6 +18,7 @@ static ngx_int_t ngx_http_rados_init_worker(ngx_cycle_t* cycle);
 
 static int url_decode(char * filename);
 static void http_parse_range(ngx_http_request_t* r, ngx_str_t* range_str, uint64_t* range_start, uint64_t* range_end, size_t content_length);
+static ngx_uint_t ngx_http_test_if_modified(ngx_http_request_t *r);
 
 typedef struct {
     ngx_array_t loc_confs; /* ngx_http_gridfs_loc_conf_t */
@@ -159,6 +160,10 @@ ngx_http_rados_handler(ngx_http_request_t *request)
         return NGX_HTTP_NOT_FOUND;
     }
 
+    if(request->headers_in.if_modified_since && ngx_http_test_if_modified(request)) {
+        return NGX_HTTP_NOT_MODIFIED;
+    }
+
     if (request->headers_in.range) {
         http_parse_range(request, &request->headers_in.range->value, &range_start, &range_end, size);
     }
@@ -166,7 +171,11 @@ ngx_http_rados_handler(ngx_http_request_t *request)
         request->headers_out.status = NGX_HTTP_OK;
         request->headers_out.content_length_n = size;
         request->headers_out.last_modified_time = mtime;
-    }else{
+    } else if(range_start >= size || range_end > size || range_end < range_start){
+            ngx_log_error(NGX_LOG_ERR, request->connection->log, 0,
+                          "Invalid range requested start: %i end: %i", range_start, range_end);
+        return NGX_HTTP_RANGE_NOT_SATISFIABLE;
+    }else {
         request->headers_out.status = NGX_HTTP_PARTIAL_CONTENT;
         request->headers_out.content_length_n = size;
 
@@ -581,4 +590,36 @@ static void http_parse_range(ngx_http_request_t* r, ngx_str_t* range_str, uint64
         return;
 
     }
+}
+
+
+static ngx_uint_t
+ngx_http_test_if_modified(ngx_http_request_t *r)
+{
+    time_t                     ims;
+    ngx_http_core_loc_conf_t  *clcf;
+
+    clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
+
+    if (clcf->if_modified_since == NGX_HTTP_IMS_OFF) {
+        return 1;
+    }
+
+    ims = ngx_http_parse_time(r->headers_in.if_modified_since->value.data,
+                              r->headers_in.if_modified_since->value.len);
+
+    ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "http ims:%d lm:%d", ims, r->headers_out.last_modified_time);
+
+    if (ims == r->headers_out.last_modified_time) {
+        return 0;
+    }
+
+    if (clcf->if_modified_since == NGX_HTTP_IMS_EXACT
+        || ims < r->headers_out.last_modified_time)
+    {
+        return 1;
+    }
+
+    return 0;
 }
