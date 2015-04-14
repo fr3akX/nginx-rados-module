@@ -122,13 +122,13 @@ ngx_http_rados_handler(ngx_http_request_t *request)
 
     rados_conn = ngx_http_get_rados_connection( rados_conf->pool );
     if(rados_conn == NULL) {
-            ngx_log_error(NGX_LOG_ERR, request->connection->log, 0,
+        ngx_log_error(NGX_LOG_DEBUG, request->connection->log, 0,
                           "Rados Connection not found: \"%s\"", &rados_conf->pool);
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
     nginx_http_get_rados_key(request, &value);
-                ngx_log_error(NGX_LOG_ERR, request->connection->log, 0,
+    ngx_log_error(NGX_LOG_DEBUG, request->connection->log, 0,
                               "Request key: \"%s\"", value);
     if(rc != NGX_OK)
         return rc;
@@ -155,8 +155,8 @@ ngx_http_rados_handler(ngx_http_request_t *request)
         request->headers_out.status = NGX_HTTP_OK;
         request->headers_out.content_length_n = size;
     } else if(range_start >= size || range_end > size || range_end < range_start){
-            ngx_log_error(NGX_LOG_ERR, request->connection->log, 0,
-                          "Invalid range requested start: %i end: %i", range_start, range_end);
+        ngx_log_error(NGX_LOG_ERR, request->connection->log, 0,
+                      "Invalid range requested start: %i end: %i", range_start, range_end);
         return NGX_HTTP_RANGE_NOT_SATISFIABLE;
     }else {
         request->headers_out.status = NGX_HTTP_PARTIAL_CONTENT;
@@ -377,28 +377,28 @@ static ngx_int_t ngx_http_rados_add_connection(ngx_cycle_t* cycle, ngx_http_rado
 
     rados_conn->pool = rados_loc_conf->pool;
 
-    ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "Initing cluster");
+    ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "Initing cluster");
     err = rados_create(&rados_conn->cluster, NULL);
     if (err < 0) {
         ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "Could not init cluster handle");
         return NGX_ERROR;
     }
 
-    ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "Reading conf: %s", conf);
+    ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "Reading conf: %s", conf);
     err = rados_conf_read_file(rados_conn->cluster, (const char *)conf);
     if (err < 0) {
         ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "Could not load cluster config: %s", conf);
         return NGX_ERROR;
     }
 
-    ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "Connecting cluster");
+    ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "Connecting cluster");
     err = rados_connect(rados_conn->cluster);
     if (err < 0) {
         ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "Cannot connect to cluster");
         return NGX_ERROR;
     }
 
-    ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "Opening io: %s", pool);
+    ngx_log_error(NGX_LOG_DEBUG, cycle->log, 0, "Opening io: %s", pool);
     err = rados_ioctx_create(rados_conn->cluster, (const char *)pool, &rados_conn->io);
     if (err < 0) {
         ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "Cannot open rados pool");
