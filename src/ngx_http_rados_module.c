@@ -127,11 +127,12 @@ ngx_http_rados_handler(ngx_http_request_t *request)
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    nginx_http_get_rados_key(request, &value);
-    ngx_log_error(NGX_LOG_DEBUG, request->connection->log, 0,
-                              "Request key: \"%s\"", value);
+    rc = nginx_http_get_rados_key(request, &value);
     if(rc != NGX_OK)
         return rc;
+
+    ngx_log_error(NGX_LOG_DEBUG, request->connection->log, 0,
+                              "Request key: \"%s\"", value);
 
     size_t size;
     time_t mtime;
@@ -618,6 +619,10 @@ nginx_http_get_rados_key(ngx_http_request_t *request, char **value)
 
     location_name = core_conf->name;
     full_uri = request->uri;
+
+    if(full_uri.len - location_name.len == 0) {
+        return NGX_HTTP_NOT_FOUND;
+     }
 
     if (full_uri.len < location_name.len) {
         ngx_log_error(NGX_LOG_ERR, request->connection->log, 0,
