@@ -99,6 +99,66 @@ ngx_module_t  ngx_http_rados_module = {
     NGX_MODULE_V1_PADDING
 };
 
+//not possible to implement with rados_io, as nginx frees allocated buffer after handler return
+//typedef struct  {
+//    ngx_http_request_t *request;
+//    size_t size;
+//    time_t mtime;
+//    char *key;
+//} aio_state;
+//#define HELLO_WORLD "hello world"
+//
+//static u_char ngx_hello_world[] = HELLO_WORLD;
+//
+//static void on_aio_complete(rados_completion_t cb, void *arg){
+//    rados_aio_release(cb);
+//    aio_state *state = (aio_state *) arg;
+//    if(!state->size || !state->mtime) {
+//        printf("NOT FOUND: %s\n", state->key);
+////        state->request->headers_out.status = NGX_HTTP_NOT_FOUND;
+//    }else{
+//        printf("Recieved callback for %s, size: %zd, mtime: %zd\n", state->key, state->size, state->mtime);
+// //       state->request->headers_out.status = NGX_HTTP_OK;
+// //       state->request->headers_out.content_length_n = state->size;
+//
+//    }
+//    if(state->request->connection != NULL) {
+//    printf("Connection is heer, destroyed: %u\n", state->request->connection->destroyed);
+//    }
+//
+// //   ngx_http_set_content_type(state->request);
+////    ngx_http_send_header(state->request);
+//
+//
+//    ngx_buf_t *b;
+//    ngx_chain_t out;
+//
+//    /* Set the Content-Type header. */
+//    state->request->headers_out.content_type.len = sizeof("text/plain") - 1;
+//    state->request->headers_out.content_type.data = (u_char *) "text/plain";
+//
+//    /* Allocate a new buffer for sending out the reply. */
+//    b = ngx_pcalloc(state->request->pool, sizeof(ngx_buf_t));
+//
+//    /* Insertion in the buffer chain. */
+//    out.buf = b;
+//    out.next = NULL; /* just one buffer */
+//
+//    b->pos = ngx_hello_world; /* first position in memory of the data */
+//    b->last = ngx_hello_world + sizeof(ngx_hello_world); /* last position in memory of the data */
+//    b->memory = 1; /* content is in read-only memory */
+//    b->last_buf = 1; /* there will be no more buffers in the request */
+//
+//    /* Sending the headers for the reply. */
+//    state->request->headers_out.status = NGX_HTTP_OK; /* 200 status code */
+//    /* Get the content length of the body. */
+//    state->request->headers_out.content_length_n = sizeof(ngx_hello_world);
+//    ngx_http_send_header(state->request); /* Send the headers */
+//
+//    /* Send the body, and return the status code of the output filter chain. */
+//    ngx_http_output_filter(state->request, &out);
+//}
+
 static ngx_int_t
 ngx_http_rados_handler(ngx_http_request_t *request)
 {
@@ -110,6 +170,15 @@ ngx_http_rados_handler(ngx_http_request_t *request)
     char* contenttype = NULL;
     uint64_t range_start = 0;
     uint64_t range_end   = 0;
+
+    size_t ctypebuf_len = 1024;
+    char ctypebuf[ctypebuf_len];
+
+    size_t BUF_LEN = 1048576;
+    char iobuffer[BUF_LEN+1];
+
+    size_t size;
+    time_t mtime;
 
     ngx_int_t rc = NGX_OK;
     ngx_int_t err;
@@ -133,9 +202,23 @@ ngx_http_rados_handler(ngx_http_request_t *request)
 
     ngx_log_error(NGX_LOG_DEBUG, request->connection->log, 0,
                               "Request key: \"%s\"", value);
+//    if(true) {
+//        rados_completion_t comp;
+//        aio_state *state = ngx_pnalloc(request->pool,sizeof(aio_state));
+//        state->request = request;
+//        state->key = value;
+//        err = rados_aio_create_completion(state, on_aio_complete, NULL, &comp);
+//        if (err < 0) {
+//                    ngx_log_error(NGX_LOG_DEBUG, request->connection->log, 0,
+//                                              "Could not create aio completition");
+//                return NGX_HTTP_INTERNAL_SERVER_ERROR;
+//        }
+//
+//        rados_aio_stat(rados_conn->io, value, comp, &state->size, &state->mtime);
+//        printf("Connection is heer, destroyed: %u\n", state->request->connection->destroyed);
+//        return NGX_HTTP_AIO_ON;
+//    }
 
-    size_t size;
-    time_t mtime;
     err = rados_stat(rados_conn->io, value, &size, &mtime);
     if (err < 0) {
         ngx_log_error(NGX_LOG_ERR, request->connection->log, 0,
@@ -147,6 +230,13 @@ ngx_http_rados_handler(ngx_http_request_t *request)
 
     if(request->headers_in.if_modified_since && !ngx_http_test_if_modified(request)) {
         return NGX_HTTP_NOT_MODIFIED;
+    }
+
+    err = rados_getxattr(rados_conn->io, value, "content_type", (char *)&ctypebuf, ctypebuf_len);
+    if(err > 0) {
+        contenttype = ngx_pnalloc(request->pool,err + 1);
+        ngx_memcpy(contenttype, ctypebuf, err);
+        contenttype[err+1] = '\0';
     }
 
     if (request->headers_in.range) {
@@ -193,8 +283,6 @@ ngx_http_rados_handler(ngx_http_request_t *request)
 
 
 
-    size_t BUF_LEN = 1048576;
-    char iobuffer[BUF_LEN+1];
     size_t offset = range_start, total_read = 0;
     int read = 0;
 
