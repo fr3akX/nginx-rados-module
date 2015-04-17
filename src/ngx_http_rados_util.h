@@ -19,4 +19,6 @@ ngx_uint_t ngx_http_test_if_modified(ngx_http_request_t *r);
 */
 ngx_uint_t nginx_http_get_rados_key(ngx_http_request_t *request, char **value);
 
+//void mangle_filename_by_request_arg(ngx_http_request_t *request, char *my_variable_name);
+
 #endif

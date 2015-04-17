@@ -238,3 +238,22 @@ ngx_uint_t nginx_http_get_rados_key(ngx_http_request_t *request, char **value)
 
     return NGX_OK;
 }
+
+//void mangle_filename_by_request_arg(ngx_http_request_t *request, char *my_variable_name) {
+//    ngx_http_variable_value_t  *vv;
+//    ngx_str_t                   variable_name;
+//    ngx_uint_t                  hash_key;
+//    variable_name.data = (u_char *)my_variable_name;
+//    variable_name.len = sizeof(my_variable_name) -1;
+//    hash_key = ngx_hash_key((u_char *)my_variable_name, sizeof(my_variable_name) -1);
+//    vv = ngx_http_get_variable(request, &variable_name, hash_key);
+//
+//    if(vv != NULL && !vv->not_found && vv->len > 0){
+//        u_char *arg = ngx_pcalloc(request->pool, sizeof(u_char) * (vv->len + 1));
+//        ngx_cpystrn(arg, vv->data, vv->len);
+//
+//        *(arg+vv->len + 1) = '\0';
+//
+//        dd("Args Recieved f: %s", arg);
+//    }
+//}

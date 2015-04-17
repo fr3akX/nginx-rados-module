@@ -104,12 +104,12 @@ ngx_module_t  ngx_http_rados_module = {
 static void send_status_and_finish_connection(ngx_http_request_t *request, ngx_uint_t status, ngx_str_t *message, int ngx_code) {
     ngx_chain_t* out = (ngx_chain_t*)ngx_palloc(request->connection->pool, sizeof(ngx_chain_t));
 
-    request->headers_out.content_type.len = sizeof("text/plain") - 1;
-    request->headers_out.content_type.data = (u_char *) "text/plain";
-
     out->buf = ngx_create_temp_buf(request->connection->pool, 1);
 
     if(message != NULL) {
+        request->headers_out.content_type.len = sizeof("text/plain") - 1;
+        request->headers_out.content_type.data = (u_char *) "text/plain";
+
         out->buf->pos = message->data;
         out->buf->last = message->data + message->len;
         request->headers_out.content_length_n = message->len;
