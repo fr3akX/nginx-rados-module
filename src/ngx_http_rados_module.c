@@ -9,6 +9,11 @@
 #include <rados/librados.h>
 #include "ngx_http_rados_util.h"
 
+#ifndef DDEBUG
+#define DDEBUG 1
+#endif
+#include "ddebug.h"
+
 static char* ngx_http_rados(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 
 static void* ngx_http_rados_create_loc_conf(ngx_conf_t *cf);
@@ -95,86 +100,230 @@ ngx_module_t  ngx_http_rados_module = {
     NGX_MODULE_V1_PADDING
 };
 
+
+static void send_status_and_finish_connection(ngx_http_request_t *request, ngx_uint_t status, ngx_str_t *message, int ngx_code) {
+    ngx_chain_t* out = (ngx_chain_t*)ngx_palloc(request->connection->pool, sizeof(ngx_chain_t));
+
+    request->headers_out.content_type.len = sizeof("text/plain") - 1;
+    request->headers_out.content_type.data = (u_char *) "text/plain";
+
+    out->buf = ngx_create_temp_buf(request->connection->pool, 1);
+
+    out->buf->pos = message->data;
+    out->buf->last = message->data + message->len;
+    out->next = NULL;
+    out->buf->last_buf = 1;
+    request->headers_out.status = status;
+    request->headers_out.content_length_n = message->len;
+    ngx_http_send_header(request);
+    ngx_http_output_filter(request, out);
+    ngx_http_finalize_request(request, ngx_code);
+}
+
 //not possible to implement with rados_io, as nginx frees allocated buffer after handler return
-//typedef struct  {
-//    ngx_http_request_t *request;
-//    size_t size;
-//    time_t mtime;
-//    char *key;
-//} aio_state;
-//#define HELLO_WORLD "hello world"
-//
-//static u_char ngx_hello_world[] = HELLO_WORLD;
-//
-//static void on_aio_complete(rados_completion_t cb, void *arg){
-//    rados_aio_release(cb);
-//    aio_state *state = (aio_state *) arg;
-//    if(!state->size || !state->mtime) {
-//        printf("NOT FOUND: %s\n", state->key);
-////        state->request->headers_out.status = NGX_HTTP_NOT_FOUND;
-//    }else{
-//        printf("Recieved callback for %s, size: %zd, mtime: %zd\n", state->key, state->size, state->mtime);
-// //       state->request->headers_out.status = NGX_HTTP_OK;
-// //       state->request->headers_out.content_length_n = state->size;
-//
-//    }
-//    if(state->request->connection != NULL) {
-//    printf("Connection is heer, destroyed: %u\n", state->request->connection->destroyed);
-//    }
-//
-// //   ngx_http_set_content_type(state->request);
-////    ngx_http_send_header(state->request);
-//
-//
-//    ngx_buf_t *b;
-//    ngx_chain_t out;
-//
-//    /* Set the Content-Type header. */
-//    state->request->headers_out.content_type.len = sizeof("text/plain") - 1;
-//    state->request->headers_out.content_type.data = (u_char *) "text/plain";
-//
-//    /* Allocate a new buffer for sending out the reply. */
-//    b = ngx_pcalloc(state->request->pool, sizeof(ngx_buf_t));
-//
-//    /* Insertion in the buffer chain. */
-//    out.buf = b;
-//    out.next = NULL; /* just one buffer */
-//
-//    b->pos = ngx_hello_world; /* first position in memory of the data */
-//    b->last = ngx_hello_world + sizeof(ngx_hello_world); /* last position in memory of the data */
-//    b->memory = 1; /* content is in read-only memory */
-//    b->last_buf = 1; /* there will be no more buffers in the request */
-//
-//    /* Sending the headers for the reply. */
-//    state->request->headers_out.status = NGX_HTTP_OK; /* 200 status code */
-//    /* Get the content length of the body. */
-//    state->request->headers_out.content_length_n = sizeof(ngx_hello_world);
-//    ngx_http_send_header(state->request); /* Send the headers */
-//
-//    /* Send the body, and return the status code of the output filter chain. */
-//    ngx_http_output_filter(state->request, &out);
-//}
+typedef struct  {
+    ngx_http_request_t *request;
+    size_t size;
+    time_t mtime;
+    char *key;
+    ngx_http_rados_connection_t *rados_conn;
+
+    char *iobuffer;
+    size_t buf_len;
+    size_t offset;
+
+    size_t total_read;
+
+    uint64_t range_start;
+    uint64_t range_end;
+} aio_state;
+
+static void on_aio_complete_body(rados_completion_t cb, void *arg){
+    ngx_int_t err;
+    rados_aio_release(cb);
+    aio_state *state = (aio_state *) arg;
+
+    ngx_buf_t *buffer;
+    ngx_chain_t out;
+
+    int read = rados_aio_get_return_value(cb);
+    if(read < 0) {
+        ngx_log_error(NGX_LOG_DEBUG, state->request->connection->log, 0,
+                                      "Rados AIO Read failed");
+
+        ngx_str_t error_message = ngx_string("Rados AIO Read failed\n");
+        send_status_and_finish_connection(state->request, NGX_HTTP_INTERNAL_SERVER_ERROR, &error_message, NGX_OK);
+        return;
+    }
+
+    //dd("on_aio_complete_body returned: %u bytes, current offset: %zd, total_read: %zd, total_size: %zd", read, state->offset, state->total_read, state->size);
+
+    /* Allocate a new buffer for sending out the reply. */
+    buffer = ngx_pcalloc(state->request->pool, sizeof(ngx_buf_t));
+    if(buffer == NULL) {
+        ngx_log_error(NGX_LOG_DEBUG, state->request->connection->log, 0,
+                                      "Could not allocate read buffer");
+
+        ngx_str_t error_message = ngx_string("Could not allocate read buffer\n");
+        send_status_and_finish_connection(state->request, NGX_HTTP_INTERNAL_SERVER_ERROR, &error_message, NGX_OK);
+        return;
+    }
+
+    state->offset += read;
+    state->total_read += read;
+
+    buffer->pos = (u_char*)state->iobuffer;
+    buffer->last = (u_char*)state->iobuffer + read;
+    buffer->memory = 1;
+    buffer->last_buf = (state->size <= state->total_read);
+    out.buf = buffer;
+    out.next = NULL;
+
+    ngx_http_output_filter(state->request, &out);
+    ngx_pfree(state->request->pool, buffer);
+
+    if(buffer->last_buf) {
+        ngx_http_finalize_request(state->request, NGX_OK);
+        return;
+    }else{
+        //call another async, doing async recursion
+        rados_completion_t comp;
+        err = rados_aio_create_completion(state, on_aio_complete_body, NULL, &comp);
+        if (err < 0) {
+                    ngx_log_error(NGX_LOG_DEBUG, state->request->connection->log, 0,
+                                              "Could not create aio completition");
+                state->request->headers_out.status = NGX_HTTP_INTERNAL_SERVER_ERROR;
+                ngx_http_finalize_request(state->request, NGX_ERROR);
+                return;
+        }
+
+        //dd("Spawning async rados_aio_read offset: %zd", state->total_read);
+        err = rados_aio_read(state->rados_conn->io, state->key, comp, state->iobuffer, state->buf_len, state->offset);
+        if (err < 0) {
+                    ngx_log_error(NGX_LOG_DEBUG, state->request->connection->log, 0,
+                                              "rados_aio_read Failed");
+                state->request->headers_out.status = NGX_HTTP_INTERNAL_SERVER_ERROR;
+                ngx_http_finalize_request(state->request, NGX_ERROR);
+                return;
+        }
+
+    }
+}
+
+static void on_aio_complete_header(rados_completion_t cb, void *arg){
+    ngx_int_t err;
+    int success;
+    aio_state *state;
+
+    state = (aio_state *) arg;
+    success = rados_aio_get_return_value(cb);
+    rados_aio_release(cb);
+
+    if(success < 0 || !state->size || !state->mtime) {
+        ngx_log_error(NGX_LOG_ERR, state->request->connection->log, 0,
+                                  "File not found in rados: %s", state->key);
+        ngx_str_t error_message = ngx_string("File not found\n");
+        send_status_and_finish_connection(state->request, NGX_HTTP_NOT_FOUND, &error_message, NGX_OK);
+        return;
+    }
+
+    dd("Recieved callback for %s, size: %zd, mtime: %zd\n", state->key, state->size, state->mtime);
+    state->request->headers_out.status = NGX_HTTP_OK;
+    state->request->headers_out.content_length_n = state->size;
+    state->request->headers_out.last_modified_time = state->mtime;
+
+    if(state->request->headers_in.if_modified_since && !ngx_http_test_if_modified(state->request)) {
+        state->request->headers_out.status = NGX_HTTP_NOT_MODIFIED;
+        ngx_http_send_header(state->request); /* Send the headers */
+        ngx_http_finalize_request(state->request, NGX_OK);
+        return;
+    }
+
+
+    //XXX Range request
+    state->range_start = 0;
+    state->range_end = 0;
+    if (state->request->headers_in.range) {
+        http_parse_range(state->request, &state->request->headers_in.range->value, &state->range_start, &state->range_end, state->size);
+        dd("Requested range request: %zd, %zd\n", state->range_start, state->range_end);
+    }
+    if (state->range_start == 0 && state->range_end == 0) {
+        state->request->headers_out.status = NGX_HTTP_OK;
+        state->request->headers_out.content_length_n = state->size;
+    } else if(state->range_start >= state->size || state->range_end > state->size || state->range_end < state->range_start){
+         ngx_log_error(NGX_LOG_ERR, state->request->connection->log, 0,
+                       "Invalid range requested start: %i end: %i", state->range_start, state->range_end);
+        ngx_str_t error_message = ngx_string("Invalid range in range request\n");
+        send_status_and_finish_connection(state->request, NGX_HTTP_RANGE_NOT_SATISFIABLE, &error_message, NGX_OK);
+     } else {
+        dd("Doing range request, range: %ld-%ld", (long)state->range_start, (long)state->range_end);
+
+        state->request->headers_out.status = NGX_HTTP_PARTIAL_CONTENT;
+        state->request->headers_out.content_length_n = state->size;
+
+        ngx_table_elt_t   *content_range = ngx_list_push(&state->request->headers_out.headers);
+        if (content_range == NULL) {
+                 ngx_log_error(NGX_LOG_ERR, state->request->connection->log, 0,
+                               "Failure to do ngx_list_push");
+            ngx_str_t error_message = ngx_string("Failure to do ngx_list_push\n");
+            send_status_and_finish_connection(state->request, NGX_HTTP_BAD_REQUEST, &error_message, NGX_ERROR);
+        }
+        state->request->headers_out.content_range = content_range;
+        content_range->hash = 1;
+        ngx_str_set(&content_range->key, "Content-Range");
+        content_range->value.data = ngx_pnalloc(state->request->pool,sizeof("bytes -/") - 1 + 3 * NGX_OFF_T_LEN);
+        if (content_range->value.data == NULL) {
+                         ngx_log_error(NGX_LOG_ERR, state->request->connection->log, 0,
+                                       "Failure to allocate memory");
+            ngx_str_t error_message = ngx_string("Failure to allocate memory\n");
+            send_status_and_finish_connection(state->request, NGX_HTTP_INTERNAL_SERVER_ERROR, &error_message, NGX_ERROR);
+        }
+        content_range->value.len = ngx_sprintf(content_range->value.data,
+                                             "bytes %O-%O/%O",
+                                             state->range_start, state->range_end,
+                                             state->request->headers_out.content_length_n) - content_range->value.data;
+
+        state->request->headers_out.content_length_n = state->range_end - state->range_start + 1;
+    }
+
+    rados_completion_t comp;
+    err = rados_aio_create_completion(state, on_aio_complete_body, NULL, &comp);
+    if (err < 0) {
+        ngx_log_error(NGX_LOG_DEBUG, state->request->connection->log, 0,
+                                  "Could not allocate rados_aio_create_completion");
+        ngx_str_t error_message = ngx_string("Could not allocate rados_aio_create_completion\n");
+        send_status_and_finish_connection(state->request, NGX_HTTP_INTERNAL_SERVER_ERROR, &error_message, NGX_ERROR);
+    }
+
+    state->offset = state->range_start;
+    state->total_read = 0;
+    if(state->range_end == 0 ) state->range_end = state->size;
+    state->buf_len = 1048576;
+    state->iobuffer = ngx_pnalloc(state->request->pool, state->buf_len+1);
+    if(state->iobuffer == NULL) {
+        ngx_log_error(NGX_LOG_ALERT, state->request->connection->log, 0,
+                                  "Could not allocate result buffer");
+        ngx_str_t error_message = ngx_string("Could not allocate result buffer\n");
+        send_status_and_finish_connection(state->request, NGX_HTTP_INTERNAL_SERVER_ERROR, &error_message, NGX_ERROR);
+    }
+    dd("Spawning async rados_aio_read");
+    err = rados_aio_read(state->rados_conn->io, state->key, comp, state->iobuffer, state->buf_len, state->offset);
+    if (err < 0) {
+            ngx_log_error(NGX_LOG_DEBUG, state->request->connection->log, 0,
+                                      "rados_aio_read Failed");
+            ngx_str_t error_message = ngx_string("rados_aio_read Failed\n");
+            send_status_and_finish_connection(state->request, NGX_HTTP_INTERNAL_SERVER_ERROR, &error_message, NGX_ERROR);
+            return;
+    }
+    ngx_http_send_header(state->request); /* Send the headers */
+}
 
 static ngx_int_t
 ngx_http_rados_handler(ngx_http_request_t *request)
 {
     ngx_http_rados_loc_conf_t* rados_conf;
-    ngx_buf_t* buffer;
-    ngx_chain_t out;
     char* value = NULL;
     ngx_http_rados_connection_t *rados_conn;
-    char* contenttype = NULL;
-    uint64_t range_start = 0;
-    uint64_t range_end   = 0;
-
-    size_t ctypebuf_len = 1024;
-    char ctypebuf[ctypebuf_len];
-
-    size_t BUF_LEN = 1048576;
-    char iobuffer[BUF_LEN+1];
-
-    size_t size;
-    time_t mtime;
 
     ngx_int_t rc = NGX_OK;
     ngx_int_t err;
@@ -198,125 +347,23 @@ ngx_http_rados_handler(ngx_http_request_t *request)
 
     ngx_log_error(NGX_LOG_DEBUG, request->connection->log, 0,
                               "Request key: \"%s\"", value);
-//    if(true) {
-//        rados_completion_t comp;
-//        aio_state *state = ngx_pnalloc(request->pool,sizeof(aio_state));
-//        state->request = request;
-//        state->key = value;
-//        err = rados_aio_create_completion(state, on_aio_complete, NULL, &comp);
-//        if (err < 0) {
-//                    ngx_log_error(NGX_LOG_DEBUG, request->connection->log, 0,
-//                                              "Could not create aio completition");
-//                return NGX_HTTP_INTERNAL_SERVER_ERROR;
-//        }
-//
-//        rados_aio_stat(rados_conn->io, value, comp, &state->size, &state->mtime);
-//        printf("Connection is heer, destroyed: %u\n", state->request->connection->destroyed);
-//        return NGX_HTTP_AIO_ON;
-//    }
 
-    err = rados_stat(rados_conn->io, value, &size, &mtime);
+    rados_completion_t comp;
+    aio_state *state = ngx_pnalloc(request->pool,sizeof(aio_state));
+    state->request = request;
+    state->key = value;
+    state->rados_conn = rados_conn;
+    err = rados_aio_create_completion(state, on_aio_complete_header, NULL, &comp);
     if (err < 0) {
-        ngx_log_error(NGX_LOG_ERR, request->connection->log, 0,
-                      "File not found in rados: %s", value);
-        return NGX_HTTP_NOT_FOUND;
+                ngx_log_error(NGX_LOG_DEBUG, request->connection->log, 0,
+                                          "Could not create aio completition");
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    request->headers_out.last_modified_time = mtime;
+    rados_aio_stat(rados_conn->io, value, comp, &state->size, &state->mtime);
 
-    if(request->headers_in.if_modified_since && !ngx_http_test_if_modified(request)) {
-        return NGX_HTTP_NOT_MODIFIED;
-    }
-
-    err = rados_getxattr(rados_conn->io, value, "content_type", (char *)&ctypebuf, ctypebuf_len);
-    if(err > 0) {
-        contenttype = ngx_pnalloc(request->pool,err + 1);
-        ngx_memcpy(contenttype, ctypebuf, err);
-        contenttype[err+1] = '\0';
-    }
-
-    if (request->headers_in.range) {
-        http_parse_range(request, &request->headers_in.range->value, &range_start, &range_end, size);
-    }
-    if (range_start == 0 && range_end == 0) {
-        request->headers_out.status = NGX_HTTP_OK;
-        request->headers_out.content_length_n = size;
-    } else if(range_start >= size || range_end > size || range_end < range_start){
-        ngx_log_error(NGX_LOG_ERR, request->connection->log, 0,
-                      "Invalid range requested start: %i end: %i", range_start, range_end);
-        return NGX_HTTP_RANGE_NOT_SATISFIABLE;
-    }else {
-        request->headers_out.status = NGX_HTTP_PARTIAL_CONTENT;
-        request->headers_out.content_length_n = size;
-
-        ngx_table_elt_t   *content_range = ngx_list_push(&request->headers_out.headers);
-        if (content_range == NULL) {
-            return NGX_ERROR;
-        }
-        request->headers_out.content_range = content_range;
-        content_range->hash = 1;
-        ngx_str_set(&content_range->key, "Content-Range");
-        content_range->value.data = ngx_pnalloc(request->pool,sizeof("bytes -/") - 1 + 3 * NGX_OFF_T_LEN);
-        if (content_range->value.data == NULL) {
-            return NGX_ERROR;
-        }
-        content_range->value.len = ngx_sprintf(content_range->value.data,
-                                               "bytes %O-%O/%O",
-                                               range_start, range_end,
-                                               request->headers_out.content_length_n) - content_range->value.data;
-
-        request->headers_out.content_length_n = range_end - range_start + 1;
-    }
-
-    if (contenttype != NULL) {
-        request->headers_out.content_type.len = strlen(contenttype);
-        request->headers_out.content_type.data = (u_char*)contenttype;
-    }
-    else ngx_http_set_content_type(request);
-
-    ngx_http_send_header(request);
-
-
-
-
-    size_t offset = range_start, total_read = 0;
-    int read = 0;
-
-    if(range_end == 0 ) range_end = size;
-
-    if(request->method == NGX_HTTP_GET) {
-        do {
-            read = rados_read(rados_conn->io, value, iobuffer, BUF_LEN, offset);
-            if(read > 0) {
-                buffer = ngx_pcalloc(request->pool, sizeof(ngx_buf_t));
-                if (buffer == NULL) {
-                    ngx_log_error(NGX_LOG_ERR, request->connection->log, 0,
-                                  "Failed to allocate response buffer");
-                    return NGX_HTTP_INTERNAL_SERVER_ERROR;
-                }
-
-                offset += read;
-                total_read += read;
-
-                buffer->pos = (u_char*)iobuffer;
-                buffer->last = (u_char*)iobuffer + read;
-                buffer->memory = 1;
-                buffer->last_buf = (size == total_read);
-                out.buf = buffer;
-                out.next = NULL;
-
-                rc = ngx_http_output_filter(request, &out);
-                ngx_pfree(request->pool, buffer);
-            }
-        }while(read > 0 && (total_read + range_start) < range_end);
-
-        if(read < 0) {
-            ngx_log_error(NGX_LOG_ERR, request->connection->log, 0,
-                          "Failure while reading from rados");
-        }
-    }
-
-    return rc;
+    request->main->count++;
+    return NGX_DONE;
 }
 
 static ngx_int_t ngx_http_rados_init_worker(ngx_cycle_t* cycle) {
