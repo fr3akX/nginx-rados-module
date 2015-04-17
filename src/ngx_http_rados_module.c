@@ -109,12 +109,18 @@ static void send_status_and_finish_connection(ngx_http_request_t *request, ngx_u
 
     out->buf = ngx_create_temp_buf(request->connection->pool, 1);
 
-    out->buf->pos = message->data;
-    out->buf->last = message->data + message->len;
+    if(message != NULL) {
+        out->buf->pos = message->data;
+        out->buf->last = message->data + message->len;
+        request->headers_out.content_length_n = message->len;
+    }else{
+        out->buf->pos = (u_char*)"";
+        out->buf->last = out->buf->pos+1;
+    }
     out->next = NULL;
     out->buf->last_buf = 1;
     request->headers_out.status = status;
-    request->headers_out.content_length_n = message->len;
+
     ngx_http_send_header(request);
     ngx_http_output_filter(request, out);
     ngx_http_finalize_request(request, ngx_code);
@@ -239,6 +245,15 @@ static void on_aio_complete_header(rados_completion_t cb, void *arg){
         return;
     }
 
+    if(state->request->method == NGX_HTTP_HEAD) {
+        send_status_and_finish_connection(state->request, NGX_HTTP_OK, NULL, NGX_OK);
+        return;
+    }
+    if(state->request->method != NGX_HTTP_GET) {
+        ngx_str_t error_message = ngx_string("Method not implemented\n");
+        send_status_and_finish_connection(state->request, NGX_HTTP_NOT_IMPLEMENTED, &error_message, NGX_OK);
+        return;
+    }
 
     //XXX Range request
     state->range_start = 0;
