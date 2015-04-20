@@ -152,13 +152,17 @@ static void on_aio_complete_body(rados_completion_t cb, void *arg){
     ngx_buf_t *buffer;
     ngx_chain_t out;
 
+    if(state->request->connection->write->error) {
+        dd("Connection has been reset by peer");
+        ngx_http_finalize_request(state->request, NGX_ERROR);
+        return;
+    }
+
     int read = rados_aio_get_return_value(cb);
     if(read < 0) {
         ngx_log_error(NGX_LOG_DEBUG, state->request->connection->log, 0,
                                       "Rados AIO Read failed");
-
-        ngx_str_t error_message = ngx_string("Rados AIO Read failed\n");
-        send_status_and_finish_connection(state->request, NGX_HTTP_INTERNAL_SERVER_ERROR, &error_message, NGX_OK);
+        ngx_http_finalize_request(state->request, NGX_ERROR);
         return;
     }
 
@@ -169,9 +173,7 @@ static void on_aio_complete_body(rados_completion_t cb, void *arg){
     if(buffer == NULL) {
         ngx_log_error(NGX_LOG_DEBUG, state->request->connection->log, 0,
                                       "Could not allocate read buffer");
-
-        ngx_str_t error_message = ngx_string("Could not allocate read buffer\n");
-        send_status_and_finish_connection(state->request, NGX_HTTP_INTERNAL_SERVER_ERROR, &error_message, NGX_OK);
+        ngx_http_finalize_request(state->request, NGX_ERROR);
         return;
     }
 
@@ -189,16 +191,17 @@ static void on_aio_complete_body(rados_completion_t cb, void *arg){
     ngx_pfree(state->request->pool, buffer);
 
     if(buffer->last_buf) {
+        //dd("Transfer from rados completed");
         ngx_http_finalize_request(state->request, NGX_OK);
         return;
     }else{
+        //dd("Transfering from rados: %zd bytes from %zd offset", state->buf_len, state->offset);
         //call another async, doing async recursion
         rados_completion_t comp;
         err = rados_aio_create_completion(state, on_aio_complete_body, NULL, &comp);
         if (err < 0) {
-                    ngx_log_error(NGX_LOG_DEBUG, state->request->connection->log, 0,
+                ngx_log_error(NGX_LOG_DEBUG, state->request->connection->log, 0,
                                               "Could not create aio completition");
-                state->request->headers_out.status = NGX_HTTP_INTERNAL_SERVER_ERROR;
                 ngx_http_finalize_request(state->request, NGX_ERROR);
                 return;
         }
@@ -208,7 +211,6 @@ static void on_aio_complete_body(rados_completion_t cb, void *arg){
         if (err < 0) {
                     ngx_log_error(NGX_LOG_DEBUG, state->request->connection->log, 0,
                                               "rados_aio_read Failed");
-                state->request->headers_out.status = NGX_HTTP_INTERNAL_SERVER_ERROR;
                 ngx_http_finalize_request(state->request, NGX_ERROR);
                 return;
         }
