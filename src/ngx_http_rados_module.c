@@ -14,6 +14,8 @@
 #endif
 #include "ddebug.h"
 
+#define BUF_LEN 1048576;
+
 static char* ngx_http_rados(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 
 static void* ngx_http_rados_create_loc_conf(ngx_conf_t *cf);
@@ -21,6 +23,7 @@ static char* ngx_http_rados_merge_loc_conf(ngx_conf_t *cf,
     void *parent, void *child);
 static void* ngx_http_rados_create_main_conf(ngx_conf_t* directive);
 static ngx_int_t ngx_http_rados_init_worker(ngx_cycle_t* cycle);
+static void on_aio_complete_body(rados_completion_t cb, void *arg);
 
 typedef struct {
     ngx_array_t loc_confs; /* ngx_http_gridfs_loc_conf_t */
@@ -38,7 +41,7 @@ typedef struct {
     ngx_str_t pool;
     ngx_str_t conf_path;
     ngx_flag_t enable;
-    ngx_http_upstream_conf_t upstream;
+    size_t rados_throttle;
 } ngx_http_rados_loc_conf_t;
 
 static ngx_int_t ngx_http_rados_init(ngx_http_rados_loc_conf_t *cf);
@@ -53,6 +56,13 @@ static ngx_command_t  ngx_http_rados_commands[] = {
       ngx_http_rados,
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
+      NULL },
+
+    { ngx_string("rados_throttle"),
+      NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_size_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_rados_loc_conf_t, rados_throttle),
       NULL },
 
     { ngx_string("rados_pool"),
@@ -142,12 +152,53 @@ typedef struct  {
 
     uint64_t range_start;
     uint64_t range_end;
-} aio_state;
+    ngx_event_t wev;
+    ngx_msec_t throttle;
+} ngx_http_rados_ctx_t;
+
+
+static
+void rados_reading_callback(ngx_event_t *wev)
+{
+    dd("IN rados_reading_callback");
+    int err;
+    ngx_http_rados_ctx_t *state = (ngx_http_rados_ctx_t *) wev->data;
+
+    ngx_log_error(NGX_LOG_DEBUG, wev->log, 0, "In Reading callback");
+
+    if(state->request->connection->write->error) {
+        dd("Connection has been reset by peer");
+        ngx_http_finalize_request(state->request, NGX_ERROR);
+        return;
+    }
+
+    rados_completion_t comp;
+    err = rados_aio_create_completion(state, on_aio_complete_body, NULL, &comp);
+    if (err < 0) {
+            ngx_log_error(NGX_LOG_DEBUG, state->request->connection->log, 0,
+                                          "Could not create aio completition");
+            ngx_http_finalize_request(state->request, NGX_ERROR);
+            return;
+    }
+
+
+    dd("Spawning async rados_aio_read offset: %zd", state->total_read);
+    err = rados_aio_read(state->rados_conn->io, state->key, comp, state->iobuffer, state->buf_len, state->offset);
+    if (err < 0) {
+                ngx_log_error(NGX_LOG_DEBUG, state->request->connection->log, 0,
+                                          "rados_aio_read Failed");
+            ngx_http_finalize_request(state->request, NGX_ERROR);
+            return;
+    }
+
+
+}
+
 
 static void on_aio_complete_body(rados_completion_t cb, void *arg){
     ngx_int_t err;
     rados_aio_release(cb);
-    aio_state *state = (aio_state *) arg;
+    ngx_http_rados_ctx_t *state = (ngx_http_rados_ctx_t *) arg;
 
     ngx_buf_t *buffer;
     ngx_chain_t out;
@@ -184,6 +235,7 @@ static void on_aio_complete_body(rados_completion_t cb, void *arg){
     buffer->last = (u_char*)state->iobuffer + read;
     buffer->memory = 1;
     buffer->last_buf = (state->size <= state->total_read);
+
     out.buf = buffer;
     out.next = NULL;
 
@@ -191,11 +243,11 @@ static void on_aio_complete_body(rados_completion_t cb, void *arg){
     ngx_pfree(state->request->pool, buffer);
 
     if(buffer->last_buf) {
-        //dd("Transfer from rados completed");
+        dd("Transfer from rados completed");
         ngx_http_finalize_request(state->request, NGX_OK);
         return;
     }else{
-        //dd("Transfering from rados: %zd bytes from %zd offset", state->buf_len, state->offset);
+        dd("Transfering from rados: %zd bytes from %zd offset", state->buf_len, state->offset);
         //call another async, doing async recursion
         rados_completion_t comp;
         err = rados_aio_create_completion(state, on_aio_complete_body, NULL, &comp);
@@ -206,13 +258,24 @@ static void on_aio_complete_body(rados_completion_t cb, void *arg){
                 return;
         }
 
-        //dd("Spawning async rados_aio_read offset: %zd", state->total_read);
-        err = rados_aio_read(state->rados_conn->io, state->key, comp, state->iobuffer, state->buf_len, state->offset);
-        if (err < 0) {
-                    ngx_log_error(NGX_LOG_DEBUG, state->request->connection->log, 0,
-                                              "rados_aio_read Failed");
-                ngx_http_finalize_request(state->request, NGX_ERROR);
-                return;
+
+        //    /**
+        //    TIMEER TEST
+        //    */
+
+        if(state->throttle > 0) {
+        //throttling reads
+            dd("Adding Reading timer, throttling to bytes per sec: %zd", state->throttle);
+            ngx_add_timer(&state->wev, (ngx_msec_t)state->throttle);
+        } else {
+            //dd("Spawning async rados_aio_read offset: %zd", state->total_read);
+            err = rados_aio_read(state->rados_conn->io, state->key, comp, state->iobuffer, state->buf_len, state->offset);
+            if (err < 0) {
+                        ngx_log_error(NGX_LOG_DEBUG, state->request->connection->log, 0,
+                                                  "rados_aio_read Failed");
+                    ngx_http_finalize_request(state->request, NGX_ERROR);
+                    return;
+            }
         }
 
     }
@@ -221,9 +284,9 @@ static void on_aio_complete_body(rados_completion_t cb, void *arg){
 static void on_aio_complete_header(rados_completion_t cb, void *arg){
     ngx_int_t err;
     int success;
-    aio_state *state;
+    ngx_http_rados_ctx_t *state;
 
-    state = (aio_state *) arg;
+    state = (ngx_http_rados_ctx_t *) arg;
     success = rados_aio_get_return_value(cb);
     rados_aio_release(cb);
 
@@ -315,7 +378,7 @@ static void on_aio_complete_header(rados_completion_t cb, void *arg){
     state->offset = state->range_start;
     state->total_read = 0;
     if(state->range_end == 0 ) state->range_end = state->size;
-    state->buf_len = 1048576;
+    state->buf_len = BUF_LEN;
     state->iobuffer = ngx_pnalloc(state->request->pool, state->buf_len+1);
     if(state->iobuffer == NULL) {
         ngx_log_error(NGX_LOG_ALERT, state->request->connection->log, 0,
@@ -333,6 +396,51 @@ static void on_aio_complete_header(rados_completion_t cb, void *arg){
             return;
     }
     ngx_http_send_header(state->request); /* Send the headers */
+}
+
+static void
+ngx_http_rados_cleanup(void *data)
+{
+    ngx_http_rados_ctx_t *state = (ngx_http_rados_ctx_t *) data;
+
+    dd("echo sleep cleanup");
+
+    if(state->wev.timer_set) {
+        dd("Deleting timer");
+        ngx_del_timer(&state->wev);
+        return;
+    }
+    dd("Timer not set");
+}
+
+ngx_http_rados_ctx_t *
+ngx_http_rados_create_ctx(ngx_http_request_t *r)
+{
+    ngx_http_rados_ctx_t         *ctx;
+
+    ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_rados_ctx_t));
+    if (ctx == NULL) {
+        return NULL;
+    }
+
+    ctx->wev.handler   = rados_reading_callback;
+    ctx->wev.data      = ctx;
+    ctx->wev.log       = r->connection->log;
+
+    ngx_http_cleanup_t *cln = ngx_http_cleanup_add(r, 0);
+    cln->handler = ngx_http_rados_cleanup;
+    cln->data = ctx;
+
+    return ctx;
+}
+
+inline static ngx_msec_t compute_throttle(size_t limit) {
+    if(!limit) return (ngx_msec_t)0;
+
+    float buf = BUF_LEN;
+    float bufs_per_second = limit / buf;
+    float sleep = 1000/bufs_per_second;
+    return (ngx_msec_t)sleep;
 }
 
 static ngx_int_t
@@ -366,10 +474,15 @@ ngx_http_rados_handler(ngx_http_request_t *request)
                               "Request key: \"%s\"", value);
 
     rados_completion_t comp;
-    aio_state *state = ngx_pnalloc(request->pool,sizeof(aio_state));
+    ngx_http_rados_ctx_t *state = ngx_http_rados_create_ctx(request);
+    if(state == NULL) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
     state->request = request;
     state->key = value;
     state->rados_conn = rados_conn;
+    state->throttle = compute_throttle(rados_conf->rados_throttle);
     err = rados_aio_create_completion(state, on_aio_complete_header, NULL, &comp);
     if (err < 0) {
                 ngx_log_error(NGX_LOG_DEBUG, request->connection->log, 0,
@@ -378,10 +491,20 @@ ngx_http_rados_handler(ngx_http_request_t *request)
     }
 
     rados_aio_stat(rados_conn->io, value, comp, &state->size, &state->mtime);
-
     request->main->count++;
+
     return NGX_DONE;
 }
+
+
+#define TICK_TIME 10
+
+#if 1
+void ngx_dummy_timer_handler(ngx_event_t *ev)
+{
+  ngx_add_timer(ev, TICK_TIME);
+}
+#endif
 
 static ngx_int_t ngx_http_rados_init_worker(ngx_cycle_t* cycle) {
 
@@ -390,6 +513,14 @@ static ngx_int_t ngx_http_rados_init_worker(ngx_cycle_t* cycle) {
     ngx_uint_t i;
 
     signal(SIGPIPE, SIG_IGN);
+
+#if 1
+   ngx_event_t *ngx_dummy_timer = ngx_pcalloc(cycle->pool, sizeof(ngx_event_t));
+   ngx_dummy_timer->log     = ngx_cycle->log;
+   ngx_dummy_timer->data    = NULL;
+   ngx_dummy_timer->handler = ngx_dummy_timer_handler;
+   ngx_add_timer(ngx_dummy_timer, (ngx_msec_t)TICK_TIME);
+#endif
 
     rados_loc_confs = rados_main_conf->loc_confs.elts;
     ngx_array_init(&ngx_http_rados_connections, cycle->pool, 4, sizeof(ngx_http_rados_connection_t));
@@ -454,6 +585,7 @@ ngx_http_rados_create_loc_conf(ngx_conf_t *cf)
     conf->pool.data = NULL;
     conf->pool.len = 0;
     conf->enable = NGX_CONF_UNSET;
+    conf->rados_throttle = NGX_CONF_UNSET;
     return conf;
 }
 
@@ -469,6 +601,8 @@ ngx_http_rados_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_str_value(conf->pool, prev->pool, NULL);
     ngx_conf_merge_str_value(conf->conf_path, prev->conf_path, NULL);
     ngx_conf_merge_value(conf->enable, prev->enable, 0);
+    ngx_conf_merge_size_value(conf->rados_throttle, prev->rados_throttle, (size_t)0);
+
 
     if (conf->pool.len == 0 || conf->conf_path.len == 0) {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "rados_pool and rados_conf should be specified");
