@@ -264,8 +264,7 @@ static void on_aio_complete_body(rados_completion_t cb, void *arg){
         //    */
 
         if(state->throttle > 0) {
-        //throttling reads
-            dd("Adding Reading timer, throttling to bytes per sec: %zd", state->throttle);
+            dd("Adding Reading timer, throttling to sleep per buffer: %zd", state->throttle);
             ngx_add_timer(&state->wev, (ngx_msec_t)state->throttle);
         } else {
             //dd("Spawning async rados_aio_read offset: %zd", state->total_read);

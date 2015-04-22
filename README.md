@@ -13,7 +13,8 @@
          rados_pool "data";
  
          location / {
-             rados;
+            rados;
+            rados_throttle 1m;
          }
      }
  ```
