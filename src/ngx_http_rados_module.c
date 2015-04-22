@@ -378,6 +378,11 @@ static void on_aio_complete_header(rados_completion_t cb, void *arg){
     state->total_read = 0;
     if(state->range_end == 0 ) state->range_end = state->size;
     state->buf_len = BUF_LEN;
+
+    if(state->size < state->buf_len) {
+        state->buf_len = state->size;
+    }
+
     state->iobuffer = ngx_pnalloc(state->request->pool, state->buf_len+1);
     if(state->iobuffer == NULL) {
         ngx_log_error(NGX_LOG_ALERT, state->request->connection->log, 0,
@@ -388,11 +393,11 @@ static void on_aio_complete_header(rados_completion_t cb, void *arg){
     dd("Spawning async rados_aio_read");
     err = rados_aio_read(state->rados_conn->io, state->key, comp, state->iobuffer, state->buf_len, state->offset);
     if (err < 0) {
-            ngx_log_error(NGX_LOG_DEBUG, state->request->connection->log, 0,
-                                      "rados_aio_read Failed");
-            ngx_str_t error_message = ngx_string("rados_aio_read Failed\n");
-            send_status_and_finish_connection(state->request, NGX_HTTP_INTERNAL_SERVER_ERROR, &error_message, NGX_ERROR);
-            return;
+        ngx_log_error(NGX_LOG_DEBUG, state->request->connection->log, 0,
+                                  "rados_aio_read Failed");
+        ngx_str_t error_message = ngx_string("rados_aio_read Failed\n");
+        send_status_and_finish_connection(state->request, NGX_HTTP_INTERNAL_SERVER_ERROR, &error_message, NGX_ERROR);
+        return;
     }
     ngx_http_send_header(state->request); /* Send the headers */
 }
