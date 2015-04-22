@@ -211,7 +211,7 @@ static void on_aio_complete_body(rados_completion_t cb, void *arg){
     }
 
     int read = rados_aio_get_return_value(cb);
-    if(read < 0) {
+    if(read <= 0) {
         ngx_log_error(NGX_LOG_DEBUG, state->request->connection->log, 0,
                                       "Rados AIO Read failed");
         ngx_http_finalize_request(state->request, NGX_ERROR);
