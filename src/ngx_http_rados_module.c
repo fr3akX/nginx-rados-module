@@ -112,7 +112,7 @@ ngx_module_t  ngx_http_rados_module = {
 
 
 static void send_status_and_finish_connection(ngx_http_request_t *request, ngx_uint_t status, ngx_str_t *message, int ngx_code) {
-    ngx_chain_t* out = (ngx_chain_t*)ngx_palloc(request->connection->pool, sizeof(ngx_chain_t));
+    ngx_chain_t* out = (ngx_chain_t*)ngx_pcalloc(request->connection->pool, sizeof(ngx_chain_t));
 
     out->buf = ngx_create_temp_buf(request->connection->pool, 1);
 
@@ -154,6 +154,7 @@ typedef struct  {
     uint64_t range_end;
     ngx_event_t wev;
     ngx_msec_t throttle;
+    ngx_buf_t *buffer;
 } ngx_http_rados_ctx_t;
 
 
@@ -220,7 +221,12 @@ static void on_aio_complete_body(rados_completion_t cb, void *arg){
     //dd("on_aio_complete_body returned: %u bytes, current offset: %zd, total_read: %zd, total_size: %zd", read, state->offset, state->total_read, state->size);
 
     /* Allocate a new buffer for sending out the reply. */
-    buffer = ngx_pcalloc(state->request->pool, sizeof(ngx_buf_t));
+    if(state->buffer != NULL) {
+        buffer = state->buffer;
+    }else {
+        buffer = ngx_pcalloc(state->request->pool, sizeof(ngx_buf_t));
+        state->buffer = buffer;
+    }
     if(buffer == NULL) {
         ngx_log_error(NGX_LOG_DEBUG, state->request->connection->log, 0,
                                       "Could not allocate read buffer");
@@ -240,7 +246,6 @@ static void on_aio_complete_body(rados_completion_t cb, void *arg){
     out.next = NULL;
 
     ngx_http_output_filter(state->request, &out);
-    ngx_pfree(state->request->pool, buffer);
 
     if(buffer->last_buf) {
         dd("Transfer from rados completed");

@@ -232,7 +232,6 @@ ngx_uint_t nginx_http_get_rados_key(ngx_http_request_t *request, char **value)
     if (!url_decode(*value)) {
         ngx_log_error(NGX_LOG_ERR, request->connection->log, 0,
             "Malformed request.");
-            free(*value);
         return NGX_HTTP_BAD_REQUEST;
     }
 
