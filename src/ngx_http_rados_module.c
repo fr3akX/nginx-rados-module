@@ -136,7 +136,6 @@ static void send_status_and_finish_connection(ngx_http_request_t *request, ngx_u
     ngx_http_finalize_request(request, ngx_code);
 }
 
-//not possible to implement with rados_io, as nginx frees allocated buffer after handler return
 typedef struct  {
     ngx_http_request_t *request;
     size_t size;
@@ -154,7 +153,8 @@ typedef struct  {
     uint64_t range_end;
     ngx_event_t wev;
     ngx_msec_t throttle;
-    ngx_buf_t *buffer;
+    //ngx_buf_t *buffer;
+    ngx_chain_t chain_link;
 } ngx_http_rados_ctx_t;
 
 
@@ -221,16 +221,19 @@ static void on_aio_complete_body(rados_completion_t cb, void *arg){
     //dd("on_aio_complete_body returned: %u bytes, current offset: %zd, total_read: %zd, total_size: %zd", read, state->offset, state->total_read, state->size);
 
     /* Allocate a new buffer for sending out the reply. */
-    if(state->buffer != NULL) {
-        buffer = state->buffer;
+    if(state->chain_link.buf != NULL ){
+        out = state->chain_link;
+    }
+    if(state->chain_link.buf != NULL) {
+        buffer = state->chain_link.buf;
     }else {
-        buffer = ngx_pcalloc(state->request->pool, sizeof(ngx_buf_t));
-        state->buffer = buffer;
+        state->chain_link.buf = (ngx_buf_t *) ngx_pcalloc(state->request->pool, sizeof(ngx_buf_t));
+        buffer = state->chain_link.buf;
     }
     if(buffer == NULL) {
         ngx_log_error(NGX_LOG_DEBUG, state->request->connection->log, 0,
                                       "Could not allocate read buffer");
-        ngx_http_finalize_request(state->request, NGX_ERROR);
+        ngx_http_finalize_request(state->request, NGX_  ERROR);
         return;
     }
 
@@ -245,6 +248,17 @@ static void on_aio_complete_body(rados_completion_t cb, void *arg){
     out.buf = buffer;
     out.next = NULL;
 
+    if(!buffer->last_buf) {
+        dd("Allocating next buffer");
+        ngx_chain_t* out2 = (ngx_chain_t *) ngx_pcalloc(state->request->pool, sizeof(ngx_chain_t));;
+        ngx_buf_t* buf2 = (ngx_buf_t *) ngx_pcalloc(state->request->pool, sizeof(ngx_buf_t));
+        out2->buf = buf2;
+        out.next = out2;
+        state->chain_link = *out2;
+        dd("After");
+    }
+
+    dd("Writing to htt pout %zd of %zd", state->total_read, state->size);
     ngx_http_output_filter(state->request, &out);
 
     if(buffer->last_buf) {
@@ -272,7 +286,7 @@ static void on_aio_complete_body(rados_completion_t cb, void *arg){
             dd("Adding Reading timer, throttling to sleep per buffer: %zd", state->throttle);
             ngx_add_timer(&state->wev, (ngx_msec_t)state->throttle);
         } else {
-            //dd("Spawning async rados_aio_read offset: %zd", state->total_read);
+            dd("Spawning async rados_aio_read offset: %zd", state->total_read);
             err = rados_aio_read(state->rados_conn->io, state->key, comp, state->iobuffer, state->buf_len, state->offset);
             if (err < 0) {
                         ngx_log_error(NGX_LOG_DEBUG, state->request->connection->log, 0,
