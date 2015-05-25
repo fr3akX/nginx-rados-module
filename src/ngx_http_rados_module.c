@@ -233,7 +233,7 @@ static void on_aio_complete_body(rados_completion_t cb, void *arg){
     if(buffer == NULL) {
         ngx_log_error(NGX_LOG_DEBUG, state->request->connection->log, 0,
                                       "Could not allocate read buffer");
-        ngx_http_finalize_request(state->request, NGX_  ERROR);
+        ngx_http_finalize_request(state->request, NGX_ERROR);
         return;
     }
 
