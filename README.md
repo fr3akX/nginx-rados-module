@@ -1,5 +1,6 @@
 # nginx-rados-module
 Rados nginx module
+```
     server {
         listen       80;
         server_name  localhost;
@@ -13,3 +14,4 @@ Rados nginx module
             add_header Content-Disposition "attachment; filename*=\"UTF-8''$arg_f\"";
         }
 }
+```
