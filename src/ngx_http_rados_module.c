@@ -165,8 +165,6 @@ void rados_reading_callback(ngx_event_t *wev)
     int err;
     ngx_http_rados_ctx_t *state = (ngx_http_rados_ctx_t *) wev->data;
 
-    ngx_log_error(NGX_LOG_DEBUG, wev->log, 0, "In Reading callback");
-
     if(state->request->connection->write->error) {
         dd("Connection has been reset by peer");
         ngx_http_finalize_request(state->request, NGX_ERROR);
@@ -242,7 +240,10 @@ static void on_aio_complete_body(rados_completion_t cb, void *arg){
 
     buffer->pos = (u_char*)state->iobuffer;
     buffer->last = (u_char*)state->iobuffer + read;
+
     buffer->memory = 1;
+    buffer->flush = 1;
+
     buffer->last_buf = (state->size <= state->total_read);
 
     out.buf = buffer;
@@ -252,13 +253,16 @@ static void on_aio_complete_body(rados_completion_t cb, void *arg){
         dd("Allocating next buffer");
         ngx_chain_t* out2 = (ngx_chain_t *) ngx_pcalloc(state->request->pool, sizeof(ngx_chain_t));;
         ngx_buf_t* buf2 = (ngx_buf_t *) ngx_pcalloc(state->request->pool, sizeof(ngx_buf_t));
+        buf2->memory = 1;
+        buf2->flush = 1;
         out2->buf = buf2;
-        out.next = out2;
+        //out.next = out2;
         state->chain_link = *out2;
         dd("After");
     }
 
     dd("Writing to htt pout %zd of %zd", state->total_read, state->size);
+    printf("================= ngx_http_output_filter ============== \n");
     ngx_http_output_filter(state->request, &out);
 
     if(buffer->last_buf) {
@@ -469,6 +473,10 @@ inline static ngx_msec_t compute_throttle(size_t limit) {
 static ngx_int_t
 ngx_http_rados_handler(ngx_http_request_t *request)
 {
+
+    request->request_body_no_buffering = 1;
+    request->buffered = 0;
+
     ngx_http_rados_loc_conf_t* rados_conf;
     char* value = NULL;
     ngx_http_rados_connection_t *rados_conn;
