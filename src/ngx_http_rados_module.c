@@ -347,8 +347,8 @@ static void on_aio_complete_header(rados_completion_t cb, void *arg){
     state->range_end = 0;
     if (state->request->headers_in.range) {
         http_parse_range(state->request, &state->request->headers_in.range->value, &state->range_start, &state->range_end, state->size);
-        dd("Requested range request: %zd, %zd\n", state->range_start, state->range_end);
     }
+
     if (state->range_start == 0 && state->range_end == 0) {
         state->request->headers_out.status = NGX_HTTP_OK;
         state->request->headers_out.content_length_n = state->size;
@@ -357,6 +357,7 @@ static void on_aio_complete_header(rados_completion_t cb, void *arg){
                        "Invalid range requested start: %i end: %i", state->range_start, state->range_end);
         ngx_str_t error_message = ngx_string("Invalid range in range request\n");
         send_status_and_finish_connection(state->request, NGX_HTTP_RANGE_NOT_SATISFIABLE, &error_message, NGX_OK);
+        return;
      } else {
         dd("Doing range request, range: %ld-%ld", (long)state->range_start, (long)state->range_end);
 
@@ -370,6 +371,7 @@ static void on_aio_complete_header(rados_completion_t cb, void *arg){
             ngx_str_t error_message = ngx_string("Failure to do ngx_list_push\n");
             send_status_and_finish_connection(state->request, NGX_HTTP_BAD_REQUEST, &error_message, NGX_ERROR);
         }
+
         state->request->headers_out.content_range = content_range;
         content_range->hash = 1;
         ngx_str_set(&content_range->key, "Content-Range");

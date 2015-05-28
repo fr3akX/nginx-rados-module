@@ -151,6 +151,8 @@ void http_parse_range(ngx_http_request_t* r, ngx_str_t* range_str, uint64_t* ran
         if (start > end) {
             ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                            "bytes header filter: invalid range specification");
+            *range_start = start;
+            *range_end = 0;
             return;
         }
 
